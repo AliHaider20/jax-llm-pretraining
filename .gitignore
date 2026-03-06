@@ -1,0 +1,20 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+pyproject.toml
+uv.lock
+.python-version
+
+# Virtual environments
+.venv'
+
+# Checkpoint folder
+small_checkpoint.orbax/
+
+# user files
+experiment.ipynb
+.env
