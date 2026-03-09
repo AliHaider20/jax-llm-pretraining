@@ -1,0 +1,13 @@
+# Model config
+NUM_LAYERS: 6
+EMBED_DIM: 258
+NUM_HEADS: 6
+FEED_FORWARD_DIM: 688 # calculated as int(2/3 * 4 * EMBED_DIM)
+
+# Training config
+custom_tokenizer_model_path: .\red_teaming_tokenizer.pkl # Remove path to use default o200k_base tokenizer from tiktoken
+NUM_EPOCHS: 7
+BATCH_SIZE: 64
+LEARNING_RATE: 1e-4
+MAX_LENGTH: 128
+MODEL_CHECKPOINT_PATH: "model_checkpoints/model.orbax"

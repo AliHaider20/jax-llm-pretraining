@@ -17,4 +17,11 @@ small_checkpoint.orbax/
 
 # user files
 experiment.ipynb
+
+# Training files
 .env
+custom_enc.pkl
+
+# Data files
+test_data.csv
+train_data.txt

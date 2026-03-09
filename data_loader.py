@@ -1,37 +1,36 @@
-from datasets import load_dataset
 import tiktoken
 import grain as pygrain
 import jax.numpy as jnp
 from dotenv import load_dotenv
-import os
+import pickle
 
 load_dotenv()
 
-tokenizer = tiktoken.get_encoding("gpt2")
+def load_custom_encoding(path: str) -> tiktoken.Encoding:
+    with open(path, "rb") as f:
+        data = pickle.load(f)
+    return tiktoken.Encoding(
+        name=data["name"],
+        pat_str=data["pat_str"],
+        mergeable_ranks=data["mergeable_ranks"],
+        special_tokens=data["special_tokens"],
+    )
 
-vocab_size = tokenizer.n_vocab
-num_transformer_blocks = 8
-maxlen = 128
-embed_dim = 192
-num_heads = 6
-feed_forward_dim = int(2/3 * 4 * embed_dim)
-SEED = 42
-
-tokenizer = tiktoken.get_encoding("gpt2")
+tokenizer = load_custom_encoding("custom_enc.pkl")
 
 class RedTeamingDataset:
     def __init__(self, stories, maxlen, tokenizer):
         self.stories = stories
         self.maxlen = maxlen
         self.tokenizer = tokenizer
-        self.end_token = tokenizer.encode('<|endoftext|>', allowed_special={'<|endoftext|>'})[0]
+        self.end_token = tokenizer.encode('<|endoflabel|>', allowed_special="all")[0]
 
     def __len__(self):
         return len(self.stories)
 
     def __getitem__(self, idx):
         story = self.stories[idx]
-        tokens = self.tokenizer.encode(story, allowed_special={'<|endoftext|>'})
+        tokens = self.tokenizer.encode(story, allowed_special="all")
 
         if len(tokens) > self.maxlen:
             tokens = tokens[:self.maxlen]
@@ -39,18 +38,15 @@ class RedTeamingDataset:
         tokens.extend([0] * (self.maxlen - len(tokens)))
         return tokens
 
-
-
 def load_and_preprocess_data(
     batch_size,
     maxlen,
-    max_stories = 100_000,
     num_epochs = 1,
     shuffle = False,
     seed = 42
 ):
     """
-    Load and preprocess TinyStories data with memory-efficient chunk reading.
+    Load and preprocess red teaming prompts data with memory-efficient chunk reading.
 
     Args:
         file_path: Path to the text file
@@ -65,19 +61,14 @@ def load_and_preprocess_data(
         Tuple of (Grain DataLoader, estimated_batches_per_epoch)
     """
     # Login using e.g. `huggingface-cli login` to access this dataset
-    ds = load_dataset("aurora-m/redteam", token=os.getenv("HF_TOKEN"), split='train')
-    df = ds.to_pandas()[['text', 'category']].dropna(subset=['category'])
+    with open("train_data.txt", "r", encoding="utf-8") as f:
+        raw_data = f.read()
+        prompts = raw_data.split("\n")
 
-
-    def get_final_text(data):
-        data = data['text'].split("\n")[1] + ":" + data['category'] + "<|endoftext|>" + "\n"
-        return data
-
-    prompts = df.apply(get_final_text, axis=1).tolist()
     print(f"Loaded {len(prompts)} red teaming prompts")
     
     if len(prompts) == 0:
-        raise ValueError("No valid stories found in the dataset")
+        raise ValueError("No valid datapoints found in the dataset")
 
     # Calculate estimated batches per epoch
     estimated_batches_per_epoch = len(prompts) // batch_size
@@ -107,36 +98,3 @@ def load_and_preprocess_data(
     print(f"Created DataLoader with batch_size={batch_size}, maxlen={maxlen}")
     return dataloader, estimated_batches_per_epoch
     
-
-def generate_text(model, start_tokens, max_new_tokens=50, temperature=1.0):
-    tokens = list(start_tokens)
-
-    for _ in range(max_new_tokens):
-        context = tokens[-model.maxlen:]
-
-        # RIGHT-pad to match training (not left-pad!)
-        actual_len = len(context)
-        if actual_len < model.maxlen:
-            context = context + [0] * (model.maxlen - actual_len)
-
-        context_array = jnp.array(context)[None, :]
-        logits = model(context_array)
-
-        next_token_logits = logits[0, actual_len - 1, :] / temperature
-
-        next_token = int(jnp.argmax(next_token_logits))
-
-        if next_token == tokenizer.encode('<|endoftext|>', allowed_special={'<|endoftext|>'})[0]:
-            break
-
-        tokens.append(next_token)
-
-    return tokenizer.decode(tokens)
-
-
-def generate_story(model, story_prompt, temperature, max_new_tokens):
-    start_tokens = tokenizer.encode(story_prompt)[:maxlen]
-    generated = generate_text(model, start_tokens, max_new_tokens=max_new_tokens, temperature=temperature)
-    return generated
-
-
