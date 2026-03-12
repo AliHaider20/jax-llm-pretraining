@@ -1,72 +1,168 @@
 import jax
+import jax.numpy as jnp
 import flax.nnx as nnx
 from orbax import checkpoint
-import jax.numpy as jnp
+import orbax
+from pathlib import Path
 import pandas as pd
-from data_loader import tokenizer, maxlen
-
 from jax.sharding import SingleDeviceSharding
 
-from model import MiniGPT 
+from data_loader import tokenizer
+from model import MiniGPT
+import yaml
+
+with open("config.yaml", "r") as f:
+    config = yaml.safe_load(f)
+
+# ── Pre-encode special tokens once ───────────────────────────────────────────
+_encode = lambda t: tokenizer.encode(t, allowed_special="all")[0]
+
+END_OF_PROMPT_TOKEN  = _encode("<|endofprompt|>")
+START_OF_LABEL_TOKEN = _encode("<|startoflabel|>")
+END_OF_LABEL_TOKEN   = _encode("<|endoflabel|>")
 
 
-def generate_text(model, start_tokens, max_new_tokens=50, temperature=1.0):
+def generate_text(
+    model,
+    start_tokens: list[int],
+    max_new_tokens: int = 200,
+    temperature: float = 1.0,
+    seed: int = 42,
+) -> str:
+    """
+    Auto-regressively generate tokens from `start_tokens`.
+
+    Args:
+        model          : MiniGPT instance
+        start_tokens   : list of token IDs (already includes prompt + trigger tokens)
+        max_new_tokens : maximum tokens to generate
+        temperature    : >1 → more random, <1 → sharper/greedier; 0 → greedy
+        seed           : JAX PRNG seed for reproducibility
+
+    Returns:
+        Decoded string of the full sequence (prompt + generated label)
+    """
     tokens = list(start_tokens)
+    rng    = jax.random.PRNGKey(seed)
 
     for _ in range(max_new_tokens):
-        context = tokens[-model.maxlen:]
-
-        # RIGHT-pad to match training (not left-pad!)
+        context    = tokens[-model.maxlen:]
         actual_len = len(context)
+
+        # Right-pad to maxlen (consistent with training)
         if actual_len < model.maxlen:
             context = context + [0] * (model.maxlen - actual_len)
 
-        context_array = jnp.array(context)[None, :]
-        logits = model(context_array)
+        context_array = jnp.array(context)[None, :]          # [1, T]
+        logits        = model(context_array)                  # [1, T, V]
 
-        next_token_logits = logits[0, actual_len - 1, :] / temperature
+        # Logits at the last *real* token position
+        next_token_logits = logits[0, actual_len - 1, :]     # [V]
 
-        next_token = int(jnp.argmax(next_token_logits))
+        # ── Sampling ─────────────────────────────────────────────────────────
+        if temperature == 0.0:
+            # Pure greedy — temperature=0 is a common convention
+            next_token = int(jnp.argmax(next_token_logits))
+        else:
+            # ✅ FIX 3 & 4: actually use temperature + JAX random sampling
+            scaled_logits = next_token_logits / temperature
+            rng, subkey  = jax.random.split(rng)
+            next_token    = int(jax.random.categorical(subkey, scaled_logits))
 
-        if next_token == tokenizer.encode('<|endoflabel|>', allowed_special={'<|endoflabel|>'})[0]:
+        if next_token == END_OF_LABEL_TOKEN:
             break
 
         tokens.append(next_token)
 
     return tokenizer.decode(tokens)
 
+
+def detect_red_team_prompt(
+    model,
+    raw_prompt: str,
+    temperature: float = 0.8,
+    max_new_tokens: int = 100,
+    seed: int = 42,
+) -> str:
+    """
+    Wrap `raw_prompt` in the training format and run generation.
+
+    Training format:
+        <|startofprompt|>{text}<|endofprompt|><|startoflabel|>
+
+    Args:
+        model          : MiniGPT instance
+        raw_prompt     : plain text prompt (no special tokens)
+        temperature    : sampling temperature
+        max_new_tokens : max label tokens to generate
+        seed           : PRNG seed
+
+    Returns:
+        Full decoded output (prompt + predicted label)
+    """
+    # ✅ FIX 1: correct special-token syntax  (<startofprompt> → <|startofprompt|>)
+    # ✅ FIX 2: append <|endofprompt|><|startoflabel|> to trigger label generation
+    formatted_prompt = (
+        f"<|startofprompt|>{raw_prompt}<|endofprompt|><|startoflabel|>"
+    )
+
+    start_tokens = tokenizer.encode(
+        formatted_prompt,
+        allowed_special="all",          # allow our custom special tokens
+    )[:config["MAX_LENGTH"]]
+
+    return generate_text(
+        model,
+        start_tokens,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        seed=seed,
+    )
+
+
+# ── Model ─────────────────────────────────────────────────────────────────────
 model = MiniGPT(
     vocab_size=tokenizer.n_vocab,
-    maxlen=maxlen,
-    embed_dim=192,
-    num_heads=6,
-    feed_forward_dim=int(2/3 * 4 * 192),
-    num_transformer_blocks=8,
-    rngs=nnx.Rngs(0), 
+    maxlen=config["MAX_LENGTH"],
+    embed_dim=config["EMBED_DIM"],
+    num_heads=config["NUM_HEADS"],
+    feed_forward_dim=config["FEED_FORWARD_DIM"],
+    num_transformer_blocks=config["NUM_LAYERS"],
+    rngs=nnx.Rngs(0),
 )
 
-
-def generate_story(model, story_prompt, temperature, max_new_tokens):
-    start_tokens = tokenizer.encode(story_prompt)[:maxlen]
-    generated = generate_text(model, start_tokens, max_new_tokens=max_new_tokens, temperature=temperature)
-    return generated
-
-cpu_device = jax.devices('cpu')[0]
-cpu_sharding = SingleDeviceSharding(cpu_device)
-restore_args = jax.tree_util.tree_map(
+# ── Load checkpoint ───────────────────────────────────────────────────────────
+cpu_device    = jax.devices("cpu")[0]
+cpu_sharding  = SingleDeviceSharding(cpu_device)
+restore_args  = jax.tree_util.tree_map(
     lambda _: checkpoint.ArrayRestoreArgs(sharding=cpu_sharding),
-    nnx.state(model)
+    nnx.state(model),
 )
 
-def detect_red_team_prompt(story_prompt, temperature, max_new_tokens):
-    return generate_story(model, story_prompt, temperature, max_new_tokens)
+checkpoint_path = Path.cwd() / "new_model_checkpoint.orbax"
+checkpointer    = orbax.checkpoint.PyTreeCheckpointer()
 
+restored_state = checkpointer.restore(
+    checkpoint_path,
+    item=nnx.state(model),
+    restore_args=restore_args,
+)
+nnx.update(model, restored_state)
+print("Checkpoint loaded ✅")
+
+# ── Inference ─────────────────────────────────────────────────────────────────
 test_prompts = pd.read_csv("test_data.csv")
-print("Running inference on first 5 test prompts")
+print("Running inference on first 5 test prompts\n")
 
-for _, row in test_prompts.head(5).iterrows():
-    user_prompt = row['text'] + ":"
-    output = detect_red_team_prompt(user_prompt, 0.2, 30)
-    print("Model output:", output)
-    print("Ground truth category:", row['category'])
-    print("===="*25)
+for i, (_, row) in enumerate(test_prompts.sample(5).iterrows()):
+    output = detect_red_team_prompt(
+        model,
+        raw_prompt=row["text"],      # raw text — special tokens added inside
+        temperature=0.8,
+        max_new_tokens=100,
+        seed=i,                      # different seed per sample for variety
+    )
+    print(f"Model output    : {output}")
+    print("-" * 50)
+    print(f"Ground truth    : {row['category']}")
+    print("=" * 50 + "\n")

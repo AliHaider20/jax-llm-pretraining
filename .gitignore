@@ -14,6 +14,8 @@ uv.lock
 
 # Checkpoint folder
 small_checkpoint.orbax/
+model_checkpoints/
+new_model_checkpoint.orbax/
 
 # user files
 experiment.ipynb
@@ -25,3 +27,4 @@ custom_enc.pkl
 # Data files
 test_data.csv
 train_data.txt
+wandb

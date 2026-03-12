@@ -10,4 +10,4 @@ NUM_EPOCHS: 7
 BATCH_SIZE: 64
 LEARNING_RATE: 1e-4
 MAX_LENGTH: 128
-MODEL_CHECKPOINT_PATH: "model_checkpoints/model.orbax"
+MODEL_CHECKPOINT_PATH: "new_model_checkpoint.orbax"

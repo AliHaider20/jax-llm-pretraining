@@ -16,7 +16,7 @@ def load_custom_encoding(path: str) -> tiktoken.Encoding:
         special_tokens=data["special_tokens"],
     )
 
-tokenizer = load_custom_encoding("custom_enc.pkl")
+tokenizer = load_custom_encoding("red_teaming_tokenizer.pkl")
 
 class RedTeamingDataset:
     def __init__(self, stories, maxlen, tokenizer):
