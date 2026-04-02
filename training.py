@@ -208,6 +208,8 @@ wandb.init(
 # ── Training loop ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
 
+    print(nnx.display(model))  # Visualize model architecture and parameter counts
+
     metrics_history = {"train_loss": []}
     global_step     = 0
 

@@ -1,5 +1,5 @@
-
 import jax.numpy as jnp
+import jax.nn as jnn
 import flax.nnx as nnx
 
 class TokenAndPositionEmbedding(nnx.Module):
@@ -26,10 +26,21 @@ class TransformerBlock(nnx.Module):
             decode=False,
             rngs=rngs
         )
+        # Feed-forward network: embed_dim -> ff_dim -> embed_dim
+        self.ff_dense1 = nnx.Linear(embed_dim, ff_dim, rngs=rngs)
+        self.ff_dense2 = nnx.Linear(ff_dim, embed_dim, rngs=rngs)
         
     def __call__(self, x, mask=None):
+        # Attention with residual connection
         attn_out = self.attention(x, mask=mask)
         x = x + attn_out
+        
+        # Feed-forward with residual connection
+        ff_out = self.ff_dense1(x)
+        ff_out = jnn.relu(ff_out)  # ReLU activation
+        ff_out = self.ff_dense2(ff_out)
+        x = x + ff_out
+        
         return x
 
 class MiniGPT(nnx.Module):
@@ -39,11 +50,11 @@ class MiniGPT(nnx.Module):
         self.maxlen = maxlen
         self.embedding = TokenAndPositionEmbedding(maxlen, vocab_size, 
                                                    embed_dim, rngs=rngs)
-        self.transformer_blocks:list= nnx.data([
-            TransformerBlock(embed_dim, num_heads, feed_forward_dim, 
-                             rngs=rngs)
-            for _ in range(num_transformer_blocks)
-        ])
+        self.transformer_blocks: list = [
+    TransformerBlock(embed_dim, num_heads, feed_forward_dim, 
+                     rngs=rngs)
+    for _ in range(num_transformer_blocks)
+]
         self.output_layer = nnx.Linear(embed_dim, vocab_size, 
                                        use_bias=False, rngs=rngs)
         

@@ -22,6 +22,38 @@ START_OF_LABEL_TOKEN = _encode("<|startoflabel|>")
 END_OF_LABEL_TOKEN   = _encode("<|endoflabel|>")
 
 
+def load_model_from_checkpoint():
+    """Load model and restore from checkpoint."""
+    model = MiniGPT(
+        vocab_size=tokenizer.n_vocab,
+        maxlen=config["MAX_LENGTH"],
+        embed_dim=config["EMBED_DIM"],
+        num_heads=config["NUM_HEADS"],
+        feed_forward_dim=config["FEED_FORWARD_DIM"],
+        num_transformer_blocks=config["NUM_LAYERS"],
+        rngs=nnx.Rngs(0),
+    )
+
+    cpu_device = jax.devices("cpu")[0]
+    cpu_sharding = SingleDeviceSharding(cpu_device)
+    restore_args = jax.tree_util.tree_map(
+        lambda _: checkpoint.ArrayRestoreArgs(sharding=cpu_sharding),
+        nnx.state(model),
+    )
+
+    checkpoint_path = Path.cwd() / "new_model_checkpoint.orbax"
+    checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+
+    restored_state = checkpointer.restore(
+        checkpoint_path,
+        item=nnx.state(model),
+        restore_args=restore_args,
+        )
+    nnx.update(model, restored_state)
+    
+    return model
+
+
 def generate_text(
     model,
     start_tokens: list[int],
@@ -42,7 +74,8 @@ def generate_text(
     Returns:
         Decoded string of the full sequence (prompt + generated label)
     """
-    tokens = list(start_tokens)
+    # Convert start_tokens to regular Python integers
+    tokens = [int(t) for t in start_tokens]
     rng    = jax.random.PRNGKey(seed)
 
     for _ in range(max_new_tokens):
@@ -74,6 +107,8 @@ def generate_text(
 
         tokens.append(next_token)
 
+    # Ensure all tokens are Python integers before decoding
+    tokens = [int(t) for t in tokens]
     return tokenizer.decode(tokens)
 
 
@@ -100,8 +135,6 @@ def detect_red_team_prompt(
     Returns:
         Full decoded output (prompt + predicted label)
     """
-    # ✅ FIX 1: correct special-token syntax  (<startofprompt> → <|startofprompt|>)
-    # ✅ FIX 2: append <|endofprompt|><|startoflabel|> to trigger label generation
     formatted_prompt = (
         f"<|startofprompt|>{raw_prompt}<|endofprompt|><|startoflabel|>"
     )
@@ -119,50 +152,24 @@ def detect_red_team_prompt(
         seed=seed,
     )
 
+if __name__ == "__main__":
+    # ── Model ─────────────────────────────────────────────────────────────────────
+    model = load_model_from_checkpoint()
+    print("Model loaded from checkpoint ✅")
 
-# ── Model ─────────────────────────────────────────────────────────────────────
-model = MiniGPT(
-    vocab_size=tokenizer.n_vocab,
-    maxlen=config["MAX_LENGTH"],
-    embed_dim=config["EMBED_DIM"],
-    num_heads=config["NUM_HEADS"],
-    feed_forward_dim=config["FEED_FORWARD_DIM"],
-    num_transformer_blocks=config["NUM_LAYERS"],
-    rngs=nnx.Rngs(0),
-)
+    # ── Inference ─────────────────────────────────────────────────────────────────
+    test_prompts = pd.read_csv("test_data.csv")
+    print("Running inference on first 5 test prompts\n")
 
-# ── Load checkpoint ───────────────────────────────────────────────────────────
-cpu_device    = jax.devices("cpu")[0]
-cpu_sharding  = SingleDeviceSharding(cpu_device)
-restore_args  = jax.tree_util.tree_map(
-    lambda _: checkpoint.ArrayRestoreArgs(sharding=cpu_sharding),
-    nnx.state(model),
-)
-
-checkpoint_path = Path.cwd() / "new_model_checkpoint.orbax"
-checkpointer    = orbax.checkpoint.PyTreeCheckpointer()
-
-restored_state = checkpointer.restore(
-    checkpoint_path,
-    item=nnx.state(model),
-    restore_args=restore_args,
-)
-nnx.update(model, restored_state)
-print("Checkpoint loaded ✅")
-
-# ── Inference ─────────────────────────────────────────────────────────────────
-test_prompts = pd.read_csv("test_data.csv")
-print("Running inference on first 5 test prompts\n")
-
-for i, (_, row) in enumerate(test_prompts.sample(5).iterrows()):
-    output = detect_red_team_prompt(
-        model,
-        raw_prompt=row["text"],      # raw text — special tokens added inside
-        temperature=0.8,
-        max_new_tokens=100,
-        seed=i,                      # different seed per sample for variety
-    )
-    print(f"Model output    : {output}")
-    print("-" * 50)
-    print(f"Ground truth    : {row['category']}")
-    print("=" * 50 + "\n")
+    for i, (_, row) in enumerate(test_prompts.sample(5).iterrows()):
+        output = detect_red_team_prompt(
+            model,
+            raw_prompt=row["text"],      # raw text — special tokens added inside
+            temperature=0.8,
+            max_new_tokens=100,
+            seed=i,                      # different seed per sample for variety
+        )
+        print(f"Model output    : {output}")
+        print("-" * 60)
+        print(f"Ground truth    : {row['category']}")
+        print("=" * 60 + "\n")
